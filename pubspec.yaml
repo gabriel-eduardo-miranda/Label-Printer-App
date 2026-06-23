@@ -1,0 +1,35 @@
+name: label_printer_app
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # Gerenciamento de estado para conectar a lógica de Bluetooth com as telas
+  provider: ^6.1.1
+  
+  # Comunicação com impressoras térmicas e Bluetooth
+  flutter_pos_printer_platform: ^1.0.8
+  
+  # Gerenciamento nativo de permissões no Android
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  # Configuração para que o app reconheça imagens locais (vamos usar depois para o seu logo PNG)
+  assets:
+    - assets/images/
