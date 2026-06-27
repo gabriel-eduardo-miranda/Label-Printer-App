@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../../services/bluetooth_printer_service.dart';
 import '../bluetooth/bluetooth_connection_view.dart';
 
@@ -11,7 +12,6 @@ class HomeView extends StatefulWidget {
 }
 
 class _HomeViewState extends State<HomeView> {
-  // Controllers para capturar o texto dos inputs
   final TextEditingController _textController = TextEditingController();
   final TextEditingController _lengthController = TextEditingController();
   final TextEditingController _widthController = TextEditingController();
@@ -28,29 +28,29 @@ class _HomeViewState extends State<HomeView> {
 
   @override
   Widget build(BuildContext context) {
-    // Escuta o estado do bluetooth para saber se está conectado ou não
     final bluetoothService = context.watch<BluetoothPrinterService>();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Label Creator'),
+        title: const Text('Criador de etiquetas'),
         actions: [
-          // Exibe o status ao lado do botão, se estiver conectado
           if (bluetoothService.isConnected)
             const Padding(
-              padding: EdgeInsets.only(right: 8.0),
-              child: Text(
-                'Connected',
-                style: TextStyle(
-                  color: Colors.green,
-                  fontWeight: FontWeight.bold,
+              padding: EdgeInsets.only(right: 8),
+              child: Center(
+                child: Text(
+                  'Conectada',
+                  style: TextStyle(
+                    color: Colors.green,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ),
-          // Botão pequeno no topo direito para abrir a tela de Bluetooth
           Padding(
-            padding: const EdgeInsets.only(right: 8.0),
+            padding: const EdgeInsets.only(right: 8),
             child: IconButton(
+              tooltip: 'Bluetooth',
               icon: Icon(
                 bluetoothService.isConnected
                     ? Icons.bluetooth_connected
@@ -70,23 +70,20 @@ class _HomeViewState extends State<HomeView> {
         ],
       ),
       body: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(16),
         child: Form(
           key: _formKey,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Informação fixa do tamanho da etiqueta
               const Center(
                 child: Chip(
-                  label: Text('Label Size: 50mm x 60mm'),
-                  backgroundColor: Colors.blue, // Corrigido para Colors.blue
+                  label: Text('Tamanho da etiqueta: 50mm x 60mm'),
+                  backgroundColor: Colors.blue,
                   labelStyle: TextStyle(color: Colors.white),
                 ),
               ),
               const SizedBox(height: 20),
-
-              // Campo Texto
               TextFormField(
                 controller: _textController,
                 decoration: const InputDecoration(
@@ -94,14 +91,13 @@ class _HomeViewState extends State<HomeView> {
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
-                  if (value == null || value.isEmpty)
-                    return 'Please enter some text';
+                  if (value == null || value.isEmpty) {
+                    return 'Digite um texto';
+                  }
                   return null;
                 },
               ),
               const SizedBox(height: 16),
-
-              // Campo Comprimento
               TextFormField(
                 controller: _lengthController,
                 keyboardType: TextInputType.number,
@@ -110,14 +106,13 @@ class _HomeViewState extends State<HomeView> {
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
-                  if (value == null || value.isEmpty)
-                    return 'Please enter length';
+                  if (value == null || value.isEmpty) {
+                    return 'Digite o comprimento';
+                  }
                   return null;
                 },
               ),
               const SizedBox(height: 16),
-
-              // Campo Largura
               TextFormField(
                 controller: _widthController,
                 keyboardType: TextInputType.number,
@@ -126,42 +121,69 @@ class _HomeViewState extends State<HomeView> {
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
-                  if (value == null || value.isEmpty)
-                    return 'Please enter width';
+                  if (value == null || value.isEmpty) {
+                    return 'Digite a largura';
+                  }
                   return null;
                 },
               ),
-
-              const Spacer(), // Empurra o botão para a parte inferior da tela
-              // Botão Imprimir no canto inferior direito
+              const Spacer(),
               Align(
                 alignment: Alignment.bottomRight,
                 child: FloatingActionButton.extended(
-                  onPressed: () {
-                    if (_formKey.currentState!.validate()) {
-                      if (!bluetoothService.isConnected) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Please connect to a printer first!'),
-                          ),
-                        );
-                        return;
-                      }
-
-                      // Lógica de impressão será chamada aqui na próxima etapa
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Processing label layout...'),
-                        ),
-                      );
-                    }
-                  },
-                  label: const Text('Print'),
+                  onPressed: () => _printLabel(context, bluetoothService),
+                  label: const Text('Imprimir'),
                   icon: const Icon(Icons.print),
                 ),
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _printLabel(
+    BuildContext context,
+    BluetoothPrinterService bluetoothService,
+  ) async {
+    if (!_formKey.currentState!.validate()) return;
+
+    if (!bluetoothService.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Conecte uma impressora primeiro')),
+      );
+      return;
+    }
+
+    final length = double.tryParse(_lengthController.text.replaceAll(',', '.'));
+    final width = double.tryParse(_widthController.text.replaceAll(',', '.'));
+
+    if (length == null || width == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Digite medidas validas')));
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Enviando etiqueta para a impressora...')),
+    );
+
+    final success = await bluetoothService.printLabel(
+      text: _textController.text,
+      widthMm: width,
+      heightMm: length,
+    );
+
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Etiqueta enviada para a impressora'
+              : 'Falha ao enviar. Verifique o log do Bluetooth',
         ),
       ),
     );
