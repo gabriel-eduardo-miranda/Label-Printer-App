@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_pos_printer_platform/flutter_pos_printer_platform.dart';
+import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
 class BluetoothPrinterService extends ChangeNotifier {
@@ -12,6 +12,11 @@ class BluetoothPrinterService extends ChangeNotifier {
   static const MethodChannel _bleScannerChannel = MethodChannel(
     'label_printer_app/ble_scanner',
   );
+  static const String _labelImageAsset =
+      'assets/images/Game-of-Thrones-Stark-Family-Logo-Tv-show-transparent-PNG-image.png';
+  static const int _dpi = 203;
+  static const int _labelWidthMm = 50;
+  static const int _labelHeightMm = 60;
 
   final List<PrinterDevice> _discoveredDevices = [];
   final List<String> _debugLogs = [];
@@ -338,12 +343,12 @@ class BluetoothPrinterService extends ChangeNotifier {
 
   Future<bool> printLabel({
     required String text,
-    required double widthMm,
-    required double heightMm,
+    required String lengthText,
+    required String widthText,
   }) async {
     _log(
-      'Impressao solicitada: texto="$text", largura=${widthMm}mm, '
-      'altura=${heightMm}mm',
+      'Impressao solicitada: texto="$text", comprimento="$lengthText", '
+      'largura="$widthText"',
     );
 
     if (!_isConnected || _connectedDevice == null) {
@@ -351,44 +356,142 @@ class BluetoothPrinterService extends ChangeNotifier {
       return false;
     }
 
-    final bytes = _buildTsplLabelBytes(
+    final bytes = await _buildRasterLabelBytes(
       text: text,
-      widthMm: widthMm,
-      heightMm: heightMm,
+      lengthText: lengthText,
+      widthText: widthText,
     );
 
-    _log('Impressao: TSPL gerado com ${bytes.length} bytes');
+    _log('Impressao: raster ESC/POS gerado com ${bytes.length} bytes');
     return _sendNativePrintBytes(bytes);
   }
 
-  List<int> _buildTsplLabelBytes({
+  Future<List<int>> _buildRasterLabelBytes({
     required String text,
-    required double widthMm,
-    required double heightMm,
-  }) {
-    final safeText = text
-        .replaceAll('"', "'")
-        .replaceAll('\r', ' ')
-        .replaceAll('\n', ' ')
-        .trim();
+    required String lengthText,
+    required String widthText,
+  }) async {
+    final labelHeightPx = _mmToDots(_labelHeightMm);
+    // CONFIGURAÇÃO DA LARGURA: Transforma os 50mm em pontos (~400px) dinamicamente
+    final canvasWidth = _mmToDots(_labelWidthMm);
 
-    final width = widthMm.clamp(10, 100).toStringAsFixed(0);
-    final height = heightMm.clamp(10, 150).toStringAsFixed(0);
-    final commands = [
-      'SIZE $width mm,$height mm',
-      'GAP 2 mm,0 mm',
-      'DENSITY 8',
-      'SPEED 4',
-      'DIRECTION 1',
-      'REFERENCE 0,0',
-      'CLS',
-      'TEXT 30,30,"3",0,1,1,"$safeText"',
-      'PRINT 1,1',
+    final imageSizePx = _mmToDots(15);
+    const textLineHeight = 28;
+    final imageTextGapPx = _mmToDots(5);
+    final imageBytes = await rootBundle.load(_labelImageAsset);
+    final decodedImage = img.decodeImage(imageBytes.buffer.asUint8List());
+
+    if (decodedImage == null) {
+      throw StateError('Nao foi possivel carregar a imagem da etiqueta');
+    }
+
+    final lines = [
+      _singleLine(text),
       '',
-    ].join('\r\n');
+      'Comprimento: ${_singleLine(lengthText)}',
+      '',
+      'Largura: ${_singleLine(widthText)}',
+    ];
+    final textBlockHeight = ((lines.length - 1) * textLineHeight) + 24;
+    final contentHeight = imageSizePx + imageTextGapPx + textBlockHeight;
 
-    _log('Impressao TSPL:\n$commands');
-    return ascii.encode(commands);
+    // MARGEM ESQUERDA: Define 20 pontos de distância da borda esquerda para imagem e texto
+    final imageX = 20;
+    final textX = 20;
+
+    // Inicializa a imagem em memória (canvas) com a largura real calculada
+    final canvas = img.Image(canvasWidth, labelHeightPx)..fill(0xffffffff);
+
+    final imageY = ((labelHeightPx - contentHeight) / 2).round().clamp(
+      0,
+      labelHeightPx - imageSizePx,
+    );
+    final textY = imageY + imageSizePx + imageTextGapPx;
+
+    final resizedImage = img.copyResize(
+      decodedImage,
+      width: imageSizePx,
+      height: imageSizePx,
+    );
+    img.grayscale(resizedImage);
+    img.drawImage(
+      canvas,
+      resizedImage,
+      dstX: imageX,
+      dstY: imageY,
+      blend: true,
+    );
+
+    var currentY = textY;
+    for (final line in lines) {
+      if (line.isNotEmpty) {
+        img.drawString(
+          canvas,
+          img.arial_24,
+          textX,
+          currentY,
+          line,
+          color: 0xff000000,
+        );
+      }
+      currentY += 28;
+    }
+
+    _log(
+      'Impressao raster: etiqueta $_labelWidthMm x $_labelHeightMm mm '
+      '($canvasWidth x $labelHeightPx dots), alinhada a esquerda, '
+      'conteudo centralizado verticalmente',
+    );
+
+    return _buildEscPosRasterBytes(canvas);
+  }
+
+  int _mmToDots(num mm) => (mm / 25.4 * _dpi).round();
+
+  String _singleLine(String value) {
+    return value.replaceAll('\r', ' ').replaceAll('\n', ' ').trim();
+  }
+
+  List<int> _buildEscPosRasterBytes(img.Image image) {
+    final widthBytes = (image.width + 7) ~/ 8;
+    final raster = <int>[];
+
+    for (var y = 0; y < image.height; y++) {
+      for (var byteX = 0; byteX < widthBytes; byteX++) {
+        var byte = 0;
+        for (var bit = 0; bit < 8; bit++) {
+          final x = byteX * 8 + bit;
+          if (x >= image.width) continue;
+
+          final pixel = image.getPixel(x, y);
+          final luminance = img.getLuminance(pixel);
+          final alpha = img.getAlpha(pixel);
+          if (alpha > 32 && luminance < 180) {
+            byte |= 0x80 >> bit;
+          }
+        }
+        raster.add(byte);
+      }
+    }
+
+    return [
+      0x1b,
+      0x40,
+      0x1b,
+      0x33,
+      0x00,
+      0x1d,
+      0x76,
+      0x30,
+      0x00,
+      widthBytes & 0xff,
+      (widthBytes >> 8) & 0xff,
+      image.height & 0xff,
+      (image.height >> 8) & 0xff,
+      ...raster,
+      0x0a,
+      0x0a,
+    ];
   }
 
   Future<bool> _sendNativePrintBytes(List<int> bytes) async {
@@ -420,7 +523,7 @@ class BluetoothPrinterService extends ChangeNotifier {
       _log('Impressao BLE nativa retornou resposta inesperada: $response');
       return false;
     } catch (e) {
-      _log('Erro na impressao BLE nativa: $e');
+      _log('Erro na xaxis de impressao BLE nativa: $e');
       return false;
     }
   }

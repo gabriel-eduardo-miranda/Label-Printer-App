@@ -113,7 +113,7 @@ class _BluetoothConnectionViewState extends State<BluetoothConnectionView> {
               ? const Text(
                   'Conectada',
                   style: TextStyle(
-                    color: Colors.green,
+                    color: Colors.black,
                     fontWeight: FontWeight.bold,
                   ),
                 )

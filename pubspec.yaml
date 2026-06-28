@@ -18,6 +18,7 @@ dependencies:
   
   # Comunicação com impressoras térmicas e Bluetooth
   flutter_pos_printer_platform: ^1.0.8
+  image: ^3.3.0
   
   # Gerenciamento nativo de permissões no Android
   permission_handler: ^11.3.1

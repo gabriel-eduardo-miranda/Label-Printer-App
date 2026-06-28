@@ -32,7 +32,7 @@ class _HomeViewState extends State<HomeView> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Criador de etiquetas'),
+        title: const Text('Menta e hortelã'),
         actions: [
           if (bluetoothService.isConnected)
             const Padding(
@@ -41,7 +41,7 @@ class _HomeViewState extends State<HomeView> {
                 child: Text(
                   'Conectada',
                   style: TextStyle(
-                    color: Colors.green,
+                    color: Colors.black,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -55,7 +55,7 @@ class _HomeViewState extends State<HomeView> {
                 bluetoothService.isConnected
                     ? Icons.bluetooth_connected
                     : Icons.bluetooth,
-                color: bluetoothService.isConnected ? Colors.blue : Colors.grey,
+                color: Colors.black,
               ),
               onPressed: () {
                 Navigator.push(
@@ -79,8 +79,9 @@ class _HomeViewState extends State<HomeView> {
               const Center(
                 child: Chip(
                   label: Text('Tamanho da etiqueta: 50mm x 60mm'),
-                  backgroundColor: Colors.blue,
-                  labelStyle: TextStyle(color: Colors.white),
+                  backgroundColor: Colors.white,
+                  side: BorderSide(color: Colors.black),
+                  labelStyle: TextStyle(color: Colors.black),
                 ),
               ),
               const SizedBox(height: 20),
@@ -100,9 +101,8 @@ class _HomeViewState extends State<HomeView> {
               const SizedBox(height: 16),
               TextFormField(
                 controller: _lengthController,
-                keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                  labelText: 'Comprimento (mm)',
+                  labelText: 'Comprimento',
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
@@ -115,9 +115,8 @@ class _HomeViewState extends State<HomeView> {
               const SizedBox(height: 16),
               TextFormField(
                 controller: _widthController,
-                keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                  labelText: 'Largura (mm)',
+                  labelText: 'Largura',
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
@@ -156,24 +155,14 @@ class _HomeViewState extends State<HomeView> {
       return;
     }
 
-    final length = double.tryParse(_lengthController.text.replaceAll(',', '.'));
-    final width = double.tryParse(_widthController.text.replaceAll(',', '.'));
-
-    if (length == null || width == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Digite medidas validas')));
-      return;
-    }
-
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Enviando etiqueta para a impressora...')),
     );
 
     final success = await bluetoothService.printLabel(
       text: _textController.text,
-      widthMm: width,
-      heightMm: length,
+      lengthText: _lengthController.text,
+      widthText: _widthController.text,
     );
 
     if (!context.mounted) return;
