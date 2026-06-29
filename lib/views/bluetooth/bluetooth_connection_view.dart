@@ -28,6 +28,12 @@ class _BluetoothConnectionViewState extends State<BluetoothConnectionView> {
       appBar: AppBar(
         title: const Text('Conectar impressora'),
         actions: [
+          if (bluetoothService.isConnected)
+            IconButton(
+              tooltip: 'Alinhar etiqueta',
+              icon: const Icon(Icons.vertical_align_bottom),
+              onPressed: () => _alignLabel(context, bluetoothService),
+            ),
           IconButton(
             tooltip: 'Limpar log',
             icon: const Icon(Icons.delete_outline),
@@ -188,5 +194,25 @@ class _BluetoothConnectionViewState extends State<BluetoothConnectionView> {
     } finally {
       controller.dispose();
     }
+  }
+
+  Future<void> _alignLabel(
+    BuildContext context,
+    BluetoothPrinterService bluetoothService,
+  ) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Alinhando proxima etiqueta...')),
+    );
+
+    final success = await bluetoothService.alignNextLabel();
+    if (!context.mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success ? 'Etiqueta alinhada' : 'Falha ao alinhar. Verifique o log.',
+        ),
+      ),
+    );
   }
 }

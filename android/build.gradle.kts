@@ -5,8 +5,8 @@ allprojects {
     }
 }
 
-// Redireciona o build principal diretamente para a raiz do C: para evitar o bug de caracteres do Windows
-val newBuildDir: Directory = rootProject.layout.projectDirectory.dir("C:/build_label_app")
+// Keep Android outputs where Flutter tooling expects to find the APK.
+val newBuildDir: Directory = rootProject.layout.buildDirectory.dir("../../build").get()
 rootProject.layout.buildDirectory.value(newBuildDir)
 
 subprojects {
@@ -14,7 +14,7 @@ subprojects {
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
 
-// Mantém a dependência de avaliação segura para os subprojetos
+// Keep plugin project evaluation ordered for Gradle.
 subprojects {
     if (project.name != "app") {
         project.evaluationDependsOn(":app")

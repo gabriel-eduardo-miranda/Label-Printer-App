@@ -17,12 +17,16 @@ class BluetoothPrinterService extends ChangeNotifier {
   static const int _dpi = 203;
   static const int _labelWidthMm = 50;
   static const int _labelHeightMm = 60;
+  static const int _printableWidthDots = 384;
+  static const int _leftMarginDots = 0;
+  static const int _contentInsetDots = 8;
 
   final List<PrinterDevice> _discoveredDevices = [];
   final List<String> _debugLogs = [];
   PrinterDevice? _connectedDevice;
   bool _isScanning = false;
   bool _isConnected = false;
+  int _printJobCounter = 0;
 
   List<PrinterDevice> get discoveredDevices => _discoveredDevices;
   List<String> get debugLogs => List.unmodifiable(_debugLogs);
@@ -172,11 +176,8 @@ class BluetoothPrinterService extends ChangeNotifier {
         {'timeoutMs': 7000},
       );
 
-      final nativeLogs = response is Map ? response['logs'] : null;
-      if (nativeLogs is List) {
-        for (final entry in nativeLogs) {
-          _log('Android: $entry');
-        }
+      if (response is Map) {
+        _logNativeLogs(response['logs'], fullLimit: 40);
       }
 
       final results = response is Map ? response['devices'] : response;
@@ -235,6 +236,14 @@ class BluetoothPrinterService extends ChangeNotifier {
       _log('Conexao sem PIN/pareamento previo');
     }
 
+    if (Platform.isAndroid) {
+      final nativeConnected = await _connectWithNativeBleFallback(device);
+      if (!nativeConnected) {
+        _log('Conexao cancelada: canal BLE nativo nao ficou pronto');
+      }
+      return nativeConnected;
+    }
+
     try {
       final result = await _printerManager.connect(
         type: PrinterType.bluetooth,
@@ -254,10 +263,10 @@ class BluetoothPrinterService extends ChangeNotifier {
       }
 
       _log('Conexao falhou: plugin retornou false');
-      return _connectWithNativeBleFallback(device);
+      return false;
     } catch (e) {
       _log('Erro de conexao: $e');
-      return _connectWithNativeBleFallback(device);
+      return false;
     }
   }
 
@@ -281,12 +290,7 @@ class BluetoothPrinterService extends ChangeNotifier {
       );
 
       if (response is Map) {
-        final nativeLogs = response['logs'];
-        if (nativeLogs is List) {
-          for (final entry in nativeLogs) {
-            _log('Android: $entry');
-          }
-        }
+        _logNativeLogs(response['logs'], fullLimit: 60);
 
         final success = response['success'] == true;
         _log('Conexao BLE nativa retornou success=$success');
@@ -321,12 +325,7 @@ class BluetoothPrinterService extends ChangeNotifier {
       );
 
       if (response is Map) {
-        final nativeLogs = response['logs'];
-        if (nativeLogs is List) {
-          for (final entry in nativeLogs) {
-            _log('Android: $entry');
-          }
-        }
+        _logNativeLogs(response['logs'], fullLimit: 40);
 
         final success = response['success'] == true;
         _log('Pareamento BLE retornou success=$success');
@@ -346,34 +345,58 @@ class BluetoothPrinterService extends ChangeNotifier {
     required String lengthText,
     required String widthText,
   }) async {
+    final jobId = ++_printJobCounter;
     _log(
-      'Impressao solicitada: texto="$text", comprimento="$lengthText", '
+      '[XDEBUG #$jobId] Impressao solicitada: texto="$text", comprimento="$lengthText", '
       'largura="$widthText"',
     );
 
     if (!_isConnected || _connectedDevice == null) {
-      _log('Impressao cancelada: nenhuma impressora conectada');
+      _log(
+        '[XDEBUG #$jobId] Impressao cancelada: nenhuma impressora conectada',
+      );
       return false;
     }
 
     final bytes = await _buildRasterLabelBytes(
+      jobId: jobId,
       text: text,
       lengthText: lengthText,
       widthText: widthText,
     );
 
-    _log('Impressao: raster ESC/POS gerado com ${bytes.length} bytes');
-    return _sendNativePrintBytes(bytes);
+    return _sendNativePrintBytes(bytes, jobName: 'Impressao', jobId: jobId);
+  }
+
+  Future<bool> alignNextLabel() async {
+    final jobId = ++_printJobCounter;
+    if (!_isConnected || _connectedDevice == null) {
+      _log(
+        '[XDEBUG #$jobId] Alinhamento cancelado: nenhuma impressora conectada',
+      );
+      return false;
+    }
+
+    final bytes = [
+      ..._buildEscPosPrintStartBytes(_printableWidthDots),
+      0x0c,
+      0x1b,
+      0x40,
+    ];
+
+    _log('[XDEBUG #$jobId] Alinhamento: reset ESC/POS + FF');
+    return _sendNativePrintBytes(bytes, jobName: 'Alinhamento', jobId: jobId);
   }
 
   Future<List<int>> _buildRasterLabelBytes({
+    required int jobId,
     required String text,
     required String lengthText,
     required String widthText,
   }) async {
     final labelHeightPx = _mmToDots(_labelHeightMm);
-    // CONFIGURAÇÃO DA LARGURA: Transforma os 50mm em pontos (~400px) dinamicamente
-    final canvasWidth = _mmToDots(_labelWidthMm);
+    final nominalLabelWidthPx = _mmToDots(_labelWidthMm);
+    const canvasWidth = _printableWidthDots;
 
     final imageSizePx = _mmToDots(15);
     const textLineHeight = 28;
@@ -395,11 +418,9 @@ class BluetoothPrinterService extends ChangeNotifier {
     final textBlockHeight = ((lines.length - 1) * textLineHeight) + 24;
     final contentHeight = imageSizePx + imageTextGapPx + textBlockHeight;
 
-    // MARGEM ESQUERDA: Define 20 pontos de distância da borda esquerda para imagem e texto
-    final imageX = 20;
-    final textX = 20;
+    const imageX = _contentInsetDots;
+    const textX = _contentInsetDots;
 
-    // Inicializa a imagem em memória (canvas) com a largura real calculada
     final canvas = img.Image(canvasWidth, labelHeightPx)..fill(0xffffffff);
 
     final imageY = ((labelHeightPx - contentHeight) / 2).round().clamp(
@@ -434,16 +455,18 @@ class BluetoothPrinterService extends ChangeNotifier {
           color: 0xff000000,
         );
       }
-      currentY += 28;
+      currentY += textLineHeight;
     }
 
+    final firstBlackX = _findFirstBlackPixelX(canvas);
     _log(
-      'Impressao raster: etiqueta $_labelWidthMm x $_labelHeightMm mm '
-      '($canvasWidth x $labelHeightPx dots), alinhada a esquerda, '
-      'conteudo centralizado verticalmente',
+      '[XDEBUG #$jobId] Raster: etiqueta=${_labelWidthMm}x$_labelHeightMm mm '
+      'nominal=${nominalLabelWidthPx}x$labelHeightPx dots '
+      'enviado=${canvasWidth}x$labelHeightPx dots margem=$_leftMarginDots '
+      'recuo=$_contentInsetDots primeiroPretoX=$firstBlackX',
     );
 
-    return _buildEscPosRasterBytes(canvas);
+    return _buildEscPosRasterBytes(canvas, jobId: jobId);
   }
 
   int _mmToDots(num mm) => (mm / 25.4 * _dpi).round();
@@ -452,7 +475,7 @@ class BluetoothPrinterService extends ChangeNotifier {
     return value.replaceAll('\r', ' ').replaceAll('\n', ' ').trim();
   }
 
-  List<int> _buildEscPosRasterBytes(img.Image image) {
+  List<int> _buildEscPosRasterBytes(img.Image image, {required int jobId}) {
     final widthBytes = (image.width + 7) ~/ 8;
     final raster = <int>[];
 
@@ -474,12 +497,13 @@ class BluetoothPrinterService extends ChangeNotifier {
       }
     }
 
-    return [
-      0x1b,
-      0x40,
-      0x1b,
-      0x33,
-      0x00,
+    _log(
+      '[XDEBUG #$jobId] Raster bytes: ${image.width}x${image.height} px | '
+      'widthBytes=$widthBytes | dados=${raster.length} bytes',
+    );
+
+    final bytes = [
+      ..._buildEscPosPrintStartBytes(image.width),
       0x1d,
       0x76,
       0x30,
@@ -489,42 +513,146 @@ class BluetoothPrinterService extends ChangeNotifier {
       image.height & 0xff,
       (image.height >> 8) & 0xff,
       ...raster,
-      0x0a,
-      0x0a,
+      0x1b,
+      0x32,
+      0x0c,
+      0x1b,
+      0x40,
+    ];
+
+    _log(
+      '[XDEBUG #$jobId] ESC/POS job: total=${bytes.length} '
+      'checksum=${_checksum16(bytes)} prefix=${_hexPreview(bytes, 40)}',
+    );
+
+    return bytes;
+  }
+
+  List<int> _buildEscPosPrintStartBytes(int printAreaWidthDots) {
+    final leftMargin = _leftMarginDots.clamp(0, 65535).toInt();
+    final printAreaWidth = printAreaWidthDots.clamp(1, 65535).toInt();
+
+    return [
+      0x18,
+      0x1b,
+      0x40,
+      0x1b,
+      0x53,
+      0x1b,
+      0x54,
+      0x00,
+      0x1d,
+      0x50,
+      _dpi,
+      _dpi,
+      0x1b,
+      0x61,
+      0x00,
+      0x1d,
+      0x4c,
+      ..._uint16Le(leftMargin),
+      0x1d,
+      0x57,
+      ..._uint16Le(printAreaWidth),
+      0x1b,
+      0x24,
+      0x00,
+      0x00,
+      0x1b,
+      0x33,
+      0x00,
     ];
   }
 
-  Future<bool> _sendNativePrintBytes(List<int> bytes) async {
+  List<int> _uint16Le(int value) {
+    return [value & 0xff, (value >> 8) & 0xff];
+  }
+
+  int? _findFirstBlackPixelX(img.Image image) {
+    for (var y = 0; y < image.height; y++) {
+      for (var x = 0; x < image.width; x++) {
+        final pixel = image.getPixel(x, y);
+        final luminance = img.getLuminance(pixel);
+        final alpha = img.getAlpha(pixel);
+        if (alpha > 32 && luminance < 180) {
+          return x;
+        }
+      }
+    }
+    return null;
+  }
+
+  int _checksum16(List<int> bytes) {
+    var sum = 0;
+    for (final byte in bytes) {
+      sum = (sum + (byte & 0xff)) & 0xffff;
+    }
+    return sum;
+  }
+
+  String _hexPreview(List<int> bytes, int maxBytes) {
+    return bytes
+        .take(maxBytes)
+        .map((byte) => (byte & 0xff).toRadixString(16).padLeft(2, '0'))
+        .join(' ')
+        .toUpperCase();
+  }
+
+  Future<bool> _sendNativePrintBytes(
+    List<int> bytes, {
+    required String jobName,
+    required int jobId,
+  }) async {
     if (!Platform.isAndroid) {
-      _log('Impressao nativa cancelada: plataforma nao Android');
+      _log('$jobName nativa cancelada: plataforma nao Android');
       return false;
     }
 
     try {
-      _log('Impressao BLE nativa iniciada');
+      _log(
+        '[XDEBUG #$jobId] $jobName BLE: total=${bytes.length} '
+        'checksum=${_checksum16(bytes)} prefix=${_hexPreview(bytes, 40)}',
+      );
       final response = await _bleScannerChannel.invokeMethod<dynamic>(
         'writeBlePrinter',
-        {'bytes': bytes},
+        {'bytes': bytes, 'jobId': jobId},
       );
 
       if (response is Map) {
-        final nativeLogs = response['logs'];
-        if (nativeLogs is List) {
-          for (final entry in nativeLogs) {
-            _log('Android: $entry');
-          }
-        }
-
+        _logNativeLogs(response['logs'], fullLimit: 80);
         final success = response['success'] == true;
-        _log('Impressao BLE nativa retornou success=$success');
+        _log('$jobName BLE nativo retornou success=$success');
         return success;
       }
 
-      _log('Impressao BLE nativa retornou resposta inesperada: $response');
+      _log('$jobName BLE nativo retornou resposta inesperada: $response');
       return false;
     } catch (e) {
-      _log('Erro na xaxis de impressao BLE nativa: $e');
+      _log('Erro no envio BLE nativo: $e');
       return false;
+    }
+  }
+
+  void _logNativeLogs(
+    Object? nativeLogs, {
+    int fullLimit = 8,
+    int edgeCount = 3,
+  }) {
+    if (nativeLogs is! List || nativeLogs.isEmpty) return;
+
+    if (nativeLogs.length <= fullLimit) {
+      for (final entry in nativeLogs) {
+        _log('Android: $entry');
+      }
+      return;
+    }
+
+    for (final entry in nativeLogs.take(edgeCount)) {
+      _log('Android: $entry');
+    }
+    _log('Android: ${nativeLogs.length - edgeCount * 2} logs omitidos');
+    for (final entry in nativeLogs.skip(nativeLogs.length - edgeCount)) {
+      _log('Android: $entry');
     }
   }
 

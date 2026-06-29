@@ -30,6 +30,22 @@ class MainActivity : FlutterActivity() {
     private var activeFinishCallback: Runnable? = null
     private var printerGatt: BluetoothGatt? = null
     private var printerWriteCharacteristic: BluetoothGattCharacteristic? = null
+    private var printerSupportsWrite = false
+    private var printerSupportsWriteNoResponse = false
+    private var negotiatedMtu = 23
+    private var activeWriteResult: MethodChannel.Result? = null
+    private var activeWriteLogs: MutableList<String>? = null
+    private var activeWriteChunks: List<ByteArray> = emptyList()
+    private var activeWriteIndex = 0
+    private var activeWriteUseResponse = false
+    private var activeWriteStartedAtMs = 0L
+    private var activeWriteTimeout: Runnable? = null
+
+    private data class WritableCharacteristic(
+        val characteristic: BluetoothGattCharacteristic,
+        val canWrite: Boolean,
+        val canWriteNoResponse: Boolean
+    )
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -58,7 +74,8 @@ class MainActivity : FlutterActivity() {
                 }
                 "writeBlePrinter" -> {
                     val bytes = call.argument<Any>("bytes")
-                    writeBlePrinter(bytes, result)
+                    val jobId = call.argument<Number>("jobId")?.toInt()
+                    writeBlePrinter(bytes, jobId, result)
                 }
                 else -> result.notImplemented()
             }
@@ -443,9 +460,40 @@ class MainActivity : FlutterActivity() {
                     }
 
                     printerGatt = gatt
-                    printerWriteCharacteristic = writable
-                    logs.add("Conexao BLE nativa pronta: write=${writable.uuid}")
+                    printerWriteCharacteristic = writable.characteristic
+                    printerSupportsWrite = writable.canWrite
+                    printerSupportsWriteNoResponse = writable.canWriteNoResponse
+                    negotiatedMtu = 23
+                    logs.add(
+                        "Conexao BLE nativa pronta: write=${writable.characteristic.uuid} " +
+                            "withResponse=${writable.canWrite} noResponse=${writable.canWriteNoResponse}"
+                    )
+                    try {
+                        val mtuStarted = gatt.requestMtu(185)
+                        logs.add("Conexao BLE nativa: requestMtu(185)=$mtuStarted")
+                    } catch (e: SecurityException) {
+                        logs.add("Conexao BLE nativa: requestMtu SecurityException=${e.message}")
+                    } catch (e: Exception) {
+                        logs.add("Conexao BLE nativa: requestMtu exception=${e.message}")
+                    }
                     finish(true, "Conexao BLE nativa bem-sucedida")
+                }
+            }
+
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                mainHandler.post { handleWriteResponse(status) }
+            }
+
+            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+                mainHandler.post {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        negotiatedMtu = mtu
+                    }
+                    activeWriteLogs?.add("[XDEBUG BLE] MTU callback: mtu=$mtu status=$status atual=$negotiatedMtu")
                 }
             }
         }
@@ -475,8 +523,9 @@ class MainActivity : FlutterActivity() {
     private fun findWritableCharacteristic(
         gatt: BluetoothGatt,
         logs: MutableList<String>
-    ): BluetoothGattCharacteristic? {
-        var fallback: BluetoothGattCharacteristic? = null
+    ): WritableCharacteristic? {
+        var responseCandidate: WritableCharacteristic? = null
+        var noResponseCandidate: WritableCharacteristic? = null
 
         gatt.services.forEach { service ->
             logs.add("Servico BLE: ${service.uuid}")
@@ -493,15 +542,22 @@ class MainActivity : FlutterActivity() {
                         "write=$canWrite writeNoResp=$canWriteNoResponse"
                 )
 
-                if (canWriteNoResponse) return characteristic
-                if (canWrite && fallback == null) fallback = characteristic
+                val candidate = WritableCharacteristic(
+                    characteristic = characteristic,
+                    canWrite = canWrite,
+                    canWriteNoResponse = canWriteNoResponse
+                )
+                if (canWrite && responseCandidate == null) responseCandidate = candidate
+                if (canWriteNoResponse && noResponseCandidate == null) noResponseCandidate = candidate
             }
         }
 
-        return fallback
+        return responseCandidate ?: noResponseCandidate
     }
 
     private fun disconnectBlePrinter() {
+        finishActiveWrite(false, "Escrita BLE cancelada: conexao encerrada")
+
         try {
             printerGatt?.disconnect()
             printerGatt?.close()
@@ -511,12 +567,16 @@ class MainActivity : FlutterActivity() {
 
         printerGatt = null
         printerWriteCharacteristic = null
+        printerSupportsWrite = false
+        printerSupportsWriteNoResponse = false
+        negotiatedMtu = 23
     }
 
-    private fun writeBlePrinter(bytes: Any?, result: MethodChannel.Result) {
+    private fun writeBlePrinter(bytes: Any?, dartJobId: Int?, result: MethodChannel.Result) {
         val logs = mutableListOf<String>()
         val gatt = printerGatt
         val characteristic = printerWriteCharacteristic
+        val jobId = dartJobId?.let { "#$it" } ?: "native-${System.currentTimeMillis() % 100000}"
 
         if (gatt == null || characteristic == null) {
             result.success(
@@ -538,6 +598,16 @@ class MainActivity : FlutterActivity() {
             return
         }
 
+        if (activeWriteResult != null) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "logs" to listOf("[XDEBUG BLE] Escrita recusada: outra escrita ainda esta em andamento")
+                )
+            )
+            return
+        }
+
         val data = when (bytes) {
             is ByteArray -> bytes
             is ArrayList<*> -> bytes.mapNotNull { (it as? Number)?.toByte() }.toByteArray()
@@ -554,44 +624,182 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        val chunkSize = 20
-        val chunks = data.toList().chunked(chunkSize)
-        var completed = false
-        logs.add("Escrita BLE iniciada: ${data.size} bytes em ${chunks.size} chunk(s)")
+        val canWriteWithResponse =
+            printerSupportsWrite ||
+                (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0)
+        val canWriteNoResponse =
+            printerSupportsWriteNoResponse ||
+                (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0)
 
-        fun finish(success: Boolean, extraLog: String? = null) {
-            if (completed) return
-            completed = true
-            val finalLogs = if (extraLog == null) logs else logs + extraLog
-            result.success(mapOf("success" to success, "logs" to finalLogs))
+        if (!canWriteWithResponse && !canWriteNoResponse) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "logs" to listOf("[XDEBUG BLE] Escrita cancelada: characteristic nao aceita write")
+                )
+            )
+            return
         }
 
-        try {
-            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        val useResponse = canWriteWithResponse
+        val mtuPayload = (negotiatedMtu - 3).coerceAtLeast(20)
+        val chunkSize = mtuPayload.coerceAtMost(if (useResponse) 180 else 60)
+        val chunks = data.toList().chunked(chunkSize).map { chunk ->
+            ByteArray(chunk.size) { index -> chunk[index] }
+        }
 
-            chunks.forEachIndexed { index, chunk ->
-                mainHandler.postDelayed({
-                    if (completed) return@postDelayed
+        logs.add(
+            "[XDEBUG BLE] Inicio escrita $jobId bytes=${data.size} chunks=${chunks.size} " +
+                "chunkSize=$chunkSize mtu=$negotiatedMtu writeType=" +
+                (if (useResponse) "DEFAULT_ACK" else "NO_RESPONSE_THROTTLED")
+        )
+        logs.add(
+            "[XDEBUG BLE] checksum=${checksum16(data)} prefix=${hexPreview(data, 40)} " +
+                "withResponse=$canWriteWithResponse noResponse=$canWriteNoResponse"
+        )
 
-                    try {
-                        @Suppress("DEPRECATION")
-                        characteristic.value = chunk.toByteArray()
-                        @Suppress("DEPRECATION")
-                        val started = gatt.writeCharacteristic(characteristic)
-                        logs.add("Escrita BLE chunk ${index + 1}/${chunks.size}: ${chunk.size} bytes started=$started")
+        activeWriteResult = result
+        activeWriteLogs = logs
+        activeWriteChunks = chunks
+        activeWriteIndex = 0
+        activeWriteUseResponse = useResponse
+        activeWriteStartedAtMs = System.currentTimeMillis()
 
-                        if (index == chunks.lastIndex) {
-                            finish(started)
-                        }
-                    } catch (e: SecurityException) {
-                        finish(false, "Escrita BLE SecurityException: ${e.message}")
-                    } catch (e: Exception) {
-                        finish(false, "Escrita BLE exception: ${e.message}")
-                    }
-                }, index * 35L)
+        writeNextBleChunk()
+    }
+
+    private fun writeNextBleChunk() {
+        if (activeWriteResult == null) return
+        val logs = activeWriteLogs ?: mutableListOf()
+        val gatt = printerGatt
+        val characteristic = printerWriteCharacteristic
+
+        if (gatt == null || characteristic == null) {
+            finishActiveWrite(false, "[XDEBUG BLE] Escrita interrompida: GATT/characteristic nulo")
+            return
+        }
+
+        if (activeWriteIndex >= activeWriteChunks.size) {
+            finishActiveWrite(true, "[XDEBUG BLE] Todos os chunks foram enviados")
+            return
+        }
+
+        val chunkIndex = activeWriteIndex
+        val chunk = activeWriteChunks[chunkIndex]
+        val writeType =
+            if (activeWriteUseResponse) {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            } else {
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             }
+
+        try {
+            characteristic.writeType = writeType
+            @Suppress("DEPRECATION")
+            characteristic.value = chunk
+            @Suppress("DEPRECATION")
+            val started = gatt.writeCharacteristic(characteristic)
+
+            if (!started) {
+                finishActiveWrite(
+                    false,
+                    "[XDEBUG BLE] Falha ao iniciar chunk ${chunkIndex + 1}/${activeWriteChunks.size}"
+                )
+                return
+            }
+
+            if (shouldLogChunk(chunkIndex)) {
+                logs.add(
+                    "[XDEBUG BLE] chunk ${chunkIndex + 1}/${activeWriteChunks.size} " +
+                        "bytes=${chunk.size} started=true"
+                )
+            }
+
+            activeWriteIndex++
+
+            if (activeWriteUseResponse) {
+                scheduleWriteAckTimeout(chunkIndex + 1)
+            } else {
+                val delayMs = if (activeWriteIndex % 32 == 0) 90L else 18L
+                mainHandler.postDelayed({ writeNextBleChunk() }, delayMs)
+            }
+        } catch (e: SecurityException) {
+            finishActiveWrite(false, "[XDEBUG BLE] SecurityException no chunk ${chunkIndex + 1}: ${e.message}")
         } catch (e: Exception) {
-            finish(false, "Escrita BLE exception inicial: ${e.message}")
+            finishActiveWrite(false, "[XDEBUG BLE] Exception no chunk ${chunkIndex + 1}: ${e.message}")
+        }
+    }
+
+    private fun handleWriteResponse(status: Int) {
+        val logs = activeWriteLogs ?: return
+        activeWriteTimeout?.let { mainHandler.removeCallbacks(it) }
+        activeWriteTimeout = null
+
+        if (status != BluetoothGatt.GATT_SUCCESS) {
+            finishActiveWrite(false, "[XDEBUG BLE] ACK retornou status=$status no chunk $activeWriteIndex")
+            return
+        }
+
+        if (activeWriteIndex == 1 ||
+            activeWriteIndex % 50 == 0 ||
+            activeWriteIndex == activeWriteChunks.size
+        ) {
+            logs.add("[XDEBUG BLE] ACK chunk $activeWriteIndex/${activeWriteChunks.size}")
+        }
+
+        writeNextBleChunk()
+    }
+
+    private fun scheduleWriteAckTimeout(chunkNumber: Int) {
+        activeWriteTimeout?.let { mainHandler.removeCallbacks(it) }
+        val timeout = Runnable {
+            finishActiveWrite(false, "[XDEBUG BLE] Timeout aguardando ACK do chunk $chunkNumber")
+        }
+        activeWriteTimeout = timeout
+        mainHandler.postDelayed(timeout, 5000)
+    }
+
+    private fun finishActiveWrite(success: Boolean, extraLog: String? = null) {
+        val result = activeWriteResult ?: return
+        val logs = activeWriteLogs ?: mutableListOf()
+
+        activeWriteTimeout?.let { mainHandler.removeCallbacks(it) }
+        activeWriteTimeout = null
+
+        extraLog?.let { logs.add(it) }
+        val elapsedMs = System.currentTimeMillis() - activeWriteStartedAtMs
+        logs.add(
+            "[XDEBUG BLE] Fim escrita success=$success enviados=$activeWriteIndex/${activeWriteChunks.size} " +
+                "elapsedMs=$elapsedMs"
+        )
+
+        activeWriteResult = null
+        activeWriteLogs = null
+        activeWriteChunks = emptyList()
+        activeWriteIndex = 0
+        activeWriteUseResponse = false
+        activeWriteStartedAtMs = 0L
+
+        result.success(mapOf("success" to success, "logs" to logs))
+    }
+
+    private fun shouldLogChunk(chunkIndex: Int): Boolean {
+        return chunkIndex < 3 ||
+            chunkIndex + 1 == activeWriteChunks.size ||
+            (chunkIndex + 1) % 100 == 0
+    }
+
+    private fun checksum16(data: ByteArray): Int {
+        var sum = 0
+        data.forEach { byte ->
+            sum = (sum + (byte.toInt() and 0xff)) and 0xffff
+        }
+        return sum
+    }
+
+    private fun hexPreview(data: ByteArray, maxBytes: Int): String {
+        return data.take(maxBytes).joinToString(" ") { byte ->
+            "%02X".format(byte.toInt() and 0xff)
         }
     }
 
