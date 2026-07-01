@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../services/bluetooth_printer_service.dart';
@@ -15,6 +16,7 @@ class _HomeViewState extends State<HomeView> {
   final TextEditingController _textController = TextEditingController();
   final TextEditingController _lengthController = TextEditingController();
   final TextEditingController _widthController = TextEditingController();
+  final TextEditingController _quantityController = TextEditingController();
 
   final _formKey = GlobalKey<FormState>();
 
@@ -23,6 +25,7 @@ class _HomeViewState extends State<HomeView> {
     _textController.dispose();
     _lengthController.dispose();
     _widthController.dispose();
+    _quantityController.dispose();
     super.dispose();
   }
 
@@ -126,6 +129,29 @@ class _HomeViewState extends State<HomeView> {
                   return null;
                 },
               ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _quantityController,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(
+                  labelText: 'Quantidade',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) {
+                  final quantity = int.tryParse(value?.trim() ?? '');
+
+                  if (quantity == null) {
+                    return 'Digite a quantidade';
+                  }
+
+                  if (quantity <= 0) {
+                    return 'Digite uma quantidade maior que zero';
+                  }
+
+                  return null;
+                },
+              ),
               const Spacer(),
               Align(
                 alignment: Alignment.bottomRight,
@@ -155,14 +181,23 @@ class _HomeViewState extends State<HomeView> {
       return;
     }
 
+    final quantity = int.parse(_quantityController.text.trim());
+
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Enviando etiqueta para a impressora...')),
+      SnackBar(
+        content: Text(
+          quantity == 1
+              ? 'Enviando etiqueta para a impressora...'
+              : 'Enviando $quantity etiquetas para a impressora...',
+        ),
+      ),
     );
 
     final success = await bluetoothService.printLabel(
       text: _textController.text,
       lengthText: _lengthController.text,
       widthText: _widthController.text,
+      quantity: quantity,
     );
 
     if (!context.mounted) return;
@@ -171,7 +206,9 @@ class _HomeViewState extends State<HomeView> {
       SnackBar(
         content: Text(
           success
-              ? 'Etiqueta enviada para a impressora'
+              ? quantity == 1
+                    ? 'Etiqueta enviada para a impressora'
+                    : '$quantity etiquetas enviadas para a impressora'
               : 'Falha ao enviar. Verifique o log do Bluetooth',
         ),
       ),

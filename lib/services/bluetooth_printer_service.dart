@@ -344,11 +344,12 @@ class BluetoothPrinterService extends ChangeNotifier {
     required String text,
     required String lengthText,
     required String widthText,
+    required int quantity,
   }) async {
     final jobId = ++_printJobCounter;
     _log(
       '[XDEBUG #$jobId] Impressao solicitada: texto="$text", comprimento="$lengthText", '
-      'largura="$widthText"',
+      'largura="$widthText", quantidade=$quantity',
     );
 
     if (!_isConnected || _connectedDevice == null) {
@@ -358,14 +359,35 @@ class BluetoothPrinterService extends ChangeNotifier {
       return false;
     }
 
+    if (quantity <= 0) {
+      _log('[XDEBUG #$jobId] Impressao cancelada: quantidade invalida');
+      return false;
+    }
+
     final bytes = await _buildRasterLabelBytes(
       jobId: jobId,
       text: text,
       lengthText: lengthText,
       widthText: widthText,
+      quantityText: quantity.toString(),
     );
 
-    return _sendNativePrintBytes(bytes, jobName: 'Impressao', jobId: jobId);
+    for (var copy = 1; copy <= quantity; copy++) {
+      final success = await _sendNativePrintBytes(
+        bytes,
+        jobName: 'Impressao $copy/$quantity',
+        jobId: jobId,
+      );
+
+      if (!success) {
+        _log(
+          '[XDEBUG #$jobId] Impressao interrompida na etiqueta $copy/$quantity',
+        );
+        return false;
+      }
+    }
+
+    return true;
   }
 
   Future<bool> alignNextLabel() async {
@@ -393,6 +415,7 @@ class BluetoothPrinterService extends ChangeNotifier {
     required String text,
     required String lengthText,
     required String widthText,
+    required String quantityText,
   }) async {
     final labelHeightPx = _mmToDots(_labelHeightMm);
     final nominalLabelWidthPx = _mmToDots(_labelWidthMm);
@@ -414,6 +437,7 @@ class BluetoothPrinterService extends ChangeNotifier {
       'Comprimento: ${_singleLine(lengthText)}',
       '',
       'Largura: ${_singleLine(widthText)}',
+      'Quantidade: ${_singleLine(quantityText)}',
     ];
     final textBlockHeight = ((lines.length - 1) * textLineHeight) + 24;
     final contentHeight = imageSizePx + imageTextGapPx + textBlockHeight;
