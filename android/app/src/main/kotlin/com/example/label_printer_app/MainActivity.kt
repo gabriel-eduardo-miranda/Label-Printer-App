@@ -80,6 +80,35 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "label_printer_app/label_storage"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "loadLabels" -> {
+                    result.success(loadLabelsJson())
+                }
+                "saveLabels" -> {
+                    val labelsJson = call.argument<String>("labelsJson") ?: "[]"
+                    saveLabelsJson(labelsJson)
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun loadLabelsJson(): String {
+        return getSharedPreferences("label_printer_app", Context.MODE_PRIVATE)
+            .getString("labels_json", "[]") ?: "[]"
+    }
+
+    private fun saveLabelsJson(labelsJson: String) {
+        getSharedPreferences("label_printer_app", Context.MODE_PRIVATE)
+            .edit()
+            .putString("labels_json", labelsJson)
+            .apply()
     }
 
     private fun scanBleDevices(timeoutMs: Long, result: MethodChannel.Result) {

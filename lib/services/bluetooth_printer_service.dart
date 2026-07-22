@@ -12,8 +12,7 @@ class BluetoothPrinterService extends ChangeNotifier {
   static const MethodChannel _bleScannerChannel = MethodChannel(
     'label_printer_app/ble_scanner',
   );
-  static const String _labelImageAsset =
-      'assets/images/Game-of-Thrones-Stark-Family-Logo-Tv-show-transparent-PNG-image.png';
+  static const String _labelImageAsset = 'assets/images/editar.png';
   static const int _dpi = 203;
   static const int _labelWidthMm = 50;
   static const int _labelHeightMm = 60;
@@ -437,6 +436,7 @@ class BluetoothPrinterService extends ChangeNotifier {
       'Comprimento: ${_singleLine(lengthText)}',
       '',
       'Largura: ${_singleLine(widthText)}',
+      '',
       'Quantidade: ${_singleLine(quantityText)}',
     ];
     final textBlockHeight = ((lines.length - 1) * textLineHeight) + 24;
