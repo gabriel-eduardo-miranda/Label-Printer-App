@@ -1,4 +1,21 @@
-class LabelData {
+abstract class LabelListItem {
+  const LabelListItem();
+
+  String get id;
+
+  Map<String, dynamic> toJson();
+
+  static LabelListItem fromJson(Map<String, dynamic> json) {
+    final type = json['type'] as String?;
+    if (type == LabelGroupData.jsonType) {
+      return LabelGroupData.fromJson(json);
+    }
+
+    return LabelData.fromJson(json);
+  }
+}
+
+class LabelData extends LabelListItem {
   LabelData({
     required this.id,
     required this.text,
@@ -11,7 +28,7 @@ class LabelData {
 
   factory LabelData.empty() {
     return LabelData(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      id: _newId('label'),
       text: '',
       lengthText: '',
       widthText: '',
@@ -21,9 +38,7 @@ class LabelData {
 
   factory LabelData.fromJson(Map<String, dynamic> json) {
     return LabelData(
-      id:
-          (json['id'] as String?) ??
-          DateTime.now().microsecondsSinceEpoch.toString(),
+      id: (json['id'] as String?) ?? _newId('label'),
       text: (json['text'] as String?) ?? '',
       lengthText: (json['lengthText'] as String?) ?? '',
       widthText: (json['widthText'] as String?) ?? '',
@@ -33,6 +48,9 @@ class LabelData {
     );
   }
 
+  static const String jsonType = 'label';
+
+  @override
   final String id;
   String text;
   String lengthText;
@@ -50,8 +68,10 @@ class LabelData {
         quantity > 0;
   }
 
+  @override
   Map<String, dynamic> toJson() {
     return {
+      'type': jsonType,
       'id': id,
       'text': text,
       'lengthText': lengthText,
@@ -61,4 +81,63 @@ class LabelData {
       'isEditing': isEditing,
     };
   }
+}
+
+class LabelGroupData extends LabelListItem {
+  LabelGroupData({
+    required this.id,
+    required this.name,
+    required this.labels,
+    this.isEditing = true,
+    this.isExpanded = true,
+  });
+
+  factory LabelGroupData.empty() {
+    return LabelGroupData(id: _newId('group'), name: '', labels: []);
+  }
+
+  factory LabelGroupData.fromJson(Map<String, dynamic> json) {
+    final labelsJson = json['labels'];
+    final labels = labelsJson is List
+        ? labelsJson
+              .whereType<Map>()
+              .map(
+                (item) => LabelData.fromJson(Map<String, dynamic>.from(item)),
+              )
+              .toList()
+        : <LabelData>[];
+
+    return LabelGroupData(
+      id: (json['id'] as String?) ?? _newId('group'),
+      name: (json['name'] as String?) ?? '',
+      labels: labels,
+      isEditing: (json['isEditing'] as bool?) ?? true,
+      isExpanded: (json['isExpanded'] as bool?) ?? true,
+    );
+  }
+
+  static const String jsonType = 'group';
+
+  @override
+  final String id;
+  String name;
+  List<LabelData> labels;
+  bool isEditing;
+  bool isExpanded;
+
+  @override
+  Map<String, dynamic> toJson() {
+    return {
+      'type': jsonType,
+      'id': id,
+      'name': name,
+      'labels': labels.map((label) => label.toJson()).toList(),
+      'isEditing': isEditing,
+      'isExpanded': isExpanded,
+    };
+  }
+}
+
+String _newId(String prefix) {
+  return '${prefix}_${DateTime.now().microsecondsSinceEpoch}';
 }

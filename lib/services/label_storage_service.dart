@@ -11,7 +11,7 @@ class LabelStorageService {
     'label_printer_app/label_storage',
   );
 
-  Future<List<LabelData>> loadLabels() async {
+  Future<List<LabelListItem>> loadItems() async {
     try {
       final labelsJson = await _channel.invokeMethod<String>('loadLabels');
       if (labelsJson == null || labelsJson.trim().isEmpty) return [];
@@ -21,7 +21,9 @@ class LabelStorageService {
 
       return decoded
           .whereType<Map>()
-          .map((item) => LabelData.fromJson(Map<String, dynamic>.from(item)))
+          .map(
+            (item) => LabelListItem.fromJson(Map<String, dynamic>.from(item)),
+          )
           .toList();
     } on MissingPluginException {
       return [];
@@ -30,7 +32,7 @@ class LabelStorageService {
     }
   }
 
-  Future<void> saveLabels(List<LabelData> labels) async {
+  Future<void> saveItems(List<LabelListItem> labels) async {
     final labelsJson = jsonEncode(
       labels.map((label) => label.toJson()).toList(),
     );
