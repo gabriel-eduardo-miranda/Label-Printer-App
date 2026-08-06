@@ -1,6 +1,7 @@
 package com.example.label_printer_app
 
 import android.Manifest
+import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -16,15 +17,20 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import androidx.core.app.ActivityCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity : FlutterActivity() {
+    private val csvPickerRequestCode = 8842
+    private val imagePickerRequestCode = 8843
     private val mainHandler = Handler(Looper.getMainLooper())
     private var activeScanCallback: ScanCallback? = null
     private var activeFinishCallback: Runnable? = null
@@ -40,6 +46,8 @@ class MainActivity : FlutterActivity() {
     private var activeWriteUseResponse = false
     private var activeWriteStartedAtMs = 0L
     private var activeWriteTimeout: Runnable? = null
+    private var activeCsvImportResult: MethodChannel.Result? = null
+    private var activeImageImportResult: MethodChannel.Result? = null
 
     private data class WritableCharacteristic(
         val characteristic: BluetoothGattCharacteristic,
@@ -97,6 +105,50 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "label_printer_app/csv_import"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "pickCsv" -> {
+                    pickCsvFile(result)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "label_printer_app/label_image"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "loadImage" -> {
+                    result.success(loadStoredLabelImage())
+                }
+                "pickImage" -> {
+                    pickLabelImage(result)
+                }
+                "removeImage" -> {
+                    removeStoredLabelImage(result)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == csvPickerRequestCode) {
+            handleCsvPickerResult(resultCode, data)
+            return
+        }
+
+        if (requestCode == imagePickerRequestCode) {
+            handleLabelImagePickerResult(resultCode, data)
+            return
+        }
+
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     private fun loadLabelsJson(): String {
@@ -109,6 +161,276 @@ class MainActivity : FlutterActivity() {
             .edit()
             .putString("labels_json", labelsJson)
             .apply()
+    }
+
+    private fun pickCsvFile(result: MethodChannel.Result) {
+        if (activeCsvImportResult != null) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "Outra importa\u00e7\u00e3o de CSV ainda est\u00e1 em andamento"
+                )
+            )
+            return
+        }
+
+        activeCsvImportResult = result
+
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "text/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(
+                    "text/csv",
+                    "text/comma-separated-values",
+                    "application/csv",
+                    "application/vnd.ms-excel",
+                    "text/plain"
+                )
+            )
+        }
+
+        try {
+            startActivityForResult(
+                Intent.createChooser(intent, "Selecionar CSV"),
+                csvPickerRequestCode
+            )
+        } catch (e: Exception) {
+            activeCsvImportResult = null
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "N\u00e3o foi poss\u00edvel abrir os arquivos: ${e.message}"
+                )
+            )
+        }
+    }
+
+    private fun handleCsvPickerResult(resultCode: Int, data: Intent?) {
+        val result = activeCsvImportResult ?: return
+        activeCsvImportResult = null
+
+        if (resultCode != Activity.RESULT_OK) {
+            result.success(mapOf("success" to false, "canceled" to true))
+            return
+        }
+
+        val uri = data?.data
+        if (uri == null) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "Nenhum arquivo CSV selecionado"
+                )
+            )
+            return
+        }
+
+        try {
+            val displayName = getDisplayName(uri)
+            val fileName = displayName ?: uri.lastPathSegment.orEmpty()
+            val mimeType = contentResolver.getType(uri).orEmpty()
+            val hasCsvExtension = fileName.endsWith(".csv", ignoreCase = true)
+            val hasCsvMimeType = mimeType.contains("csv", ignoreCase = true)
+
+            if (!hasCsvExtension && !hasCsvMimeType) {
+                result.success(
+                    mapOf(
+                        "success" to false,
+                        "error" to "Selecione um arquivo .csv"
+                    )
+                )
+                return
+            }
+
+            val content = readCsvContent(uri)
+            result.success(
+                mapOf(
+                    "success" to true,
+                    "fileName" to fileName,
+                    "content" to content
+                )
+            )
+        } catch (e: Exception) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "Falha ao ler CSV: ${e.message}"
+                )
+            )
+        }
+    }
+
+    private fun getDisplayName(uri: Uri): String? {
+        val cursor = contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null
+        )
+
+        cursor?.use {
+            if (!it.moveToFirst()) return null
+
+            val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex == -1) return null
+
+            return it.getString(nameIndex)
+        }
+
+        return null
+    }
+
+    private fun readCsvContent(uri: Uri): String {
+        val inputStream = contentResolver.openInputStream(uri) ?: return ""
+        val bytes = inputStream.use { it.readBytes() }
+        val utf8 = String(bytes, Charsets.UTF_8)
+
+        return if (utf8.contains('\uFFFD')) {
+            String(bytes, Charsets.ISO_8859_1)
+        } else {
+            utf8
+        }
+    }
+
+    private fun pickLabelImage(result: MethodChannel.Result) {
+        if (activeImageImportResult != null) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "Outra importa\u00e7\u00e3o de imagem ainda est\u00e1 em andamento"
+                )
+            )
+            return
+        }
+
+        activeImageImportResult = result
+
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+        }
+
+        try {
+            startActivityForResult(
+                Intent.createChooser(intent, "Selecionar imagem"),
+                imagePickerRequestCode
+            )
+        } catch (e: Exception) {
+            activeImageImportResult = null
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "N\u00e3o foi poss\u00edvel abrir as imagens: ${e.message}"
+                )
+            )
+        }
+    }
+
+    private fun handleLabelImagePickerResult(resultCode: Int, data: Intent?) {
+        val result = activeImageImportResult ?: return
+        activeImageImportResult = null
+
+        if (resultCode != Activity.RESULT_OK) {
+            result.success(mapOf("success" to false, "canceled" to true))
+            return
+        }
+
+        val uri = data?.data
+        if (uri == null) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "Nenhuma imagem selecionada"
+                )
+            )
+            return
+        }
+
+        try {
+            val displayName = getDisplayName(uri) ?: uri.lastPathSegment.orEmpty()
+            val mimeType = contentResolver.getType(uri).orEmpty()
+            val hasImageMimeType = mimeType.startsWith("image/", ignoreCase = true)
+            val hasImageExtension =
+                displayName.endsWith(".png", ignoreCase = true) ||
+                    displayName.endsWith(".jpg", ignoreCase = true) ||
+                    displayName.endsWith(".jpeg", ignoreCase = true) ||
+                    displayName.endsWith(".webp", ignoreCase = true) ||
+                    displayName.endsWith(".bmp", ignoreCase = true)
+
+            if (!hasImageMimeType && !hasImageExtension) {
+                result.success(
+                    mapOf(
+                        "success" to false,
+                        "error" to "Selecione um arquivo de imagem"
+                    )
+                )
+                return
+            }
+
+            val bytes = readBinaryContent(uri)
+            if (bytes.isEmpty()) {
+                result.success(
+                    mapOf(
+                        "success" to false,
+                        "error" to "Imagem vazia ou inv\u00e1lida"
+                    )
+                )
+                return
+            }
+
+            labelImageFile().writeBytes(bytes)
+            result.success(
+                mapOf(
+                    "success" to true,
+                    "bytes" to bytes
+                )
+            )
+        } catch (e: Exception) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "Falha ao importar imagem: ${e.message}"
+                )
+            )
+        }
+    }
+
+    private fun removeStoredLabelImage(result: MethodChannel.Result) {
+        try {
+            val file = labelImageFile()
+            if (file.exists()) file.delete()
+            result.success(mapOf("success" to true))
+        } catch (e: Exception) {
+            result.success(
+                mapOf(
+                    "success" to false,
+                    "error" to "Falha ao remover imagem: ${e.message}"
+                )
+            )
+        }
+    }
+
+    private fun loadStoredLabelImage(): ByteArray? {
+        val file = labelImageFile()
+        if (!file.exists()) return null
+
+        return try {
+            file.readBytes()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun labelImageFile(): File {
+        return File(filesDir, "label_image.bin")
+    }
+
+    private fun readBinaryContent(uri: Uri): ByteArray {
+        val inputStream = contentResolver.openInputStream(uri) ?: return ByteArray(0)
+        return inputStream.use { it.readBytes() }
     }
 
     private fun scanBleDevices(timeoutMs: Long, result: MethodChannel.Result) {

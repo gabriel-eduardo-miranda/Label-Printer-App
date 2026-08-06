@@ -6,12 +6,36 @@ import 'package:provider/provider.dart';
 
 import '../../models/label_data.dart';
 import '../../services/bluetooth_printer_service.dart';
+import '../../services/label_image_service.dart';
 import '../../services/label_storage_service.dart';
 import '../bluetooth/bluetooth_connection_view.dart';
 
-enum _LabelMenuAction { addGroup, addLabel, importCsv, clearAll }
+enum _LabelMenuAction { addGroup, addLabel, importCsv, csvRules, clearAll }
 
 enum _GroupMenuAction { rename, addLabel, selectAll, unselectAll, delete }
+
+enum _LabelImageAction { remove, add }
+
+enum _CsvImportTarget { root, newGroup, existingGroup }
+
+class _CsvImportDestination {
+  const _CsvImportDestination.root()
+    : target = _CsvImportTarget.root,
+      groupId = null,
+      groupName = null;
+
+  const _CsvImportDestination.newGroup(this.groupName)
+    : target = _CsvImportTarget.newGroup,
+      groupId = null;
+
+  const _CsvImportDestination.existingGroup(this.groupId)
+    : target = _CsvImportTarget.existingGroup,
+      groupName = null;
+
+  final _CsvImportTarget target;
+  final String? groupId;
+  final String? groupName;
+}
 
 class _DragPayload {
   const _DragPayload.label(this.id, {this.sourceGroupId}) : isGroup = false;
@@ -25,6 +49,195 @@ class _DragPayload {
   bool get isLabel => !isGroup;
 }
 
+class _CsvImportDestinationDialog extends StatefulWidget {
+  const _CsvImportDestinationDialog({
+    required this.labelCount,
+    required this.groups,
+    required this.pendingMessage,
+  });
+
+  final int labelCount;
+  final List<LabelGroupData> groups;
+  final String pendingMessage;
+
+  @override
+  State<_CsvImportDestinationDialog> createState() =>
+      _CsvImportDestinationDialogState();
+}
+
+class _CsvImportDestinationDialogState
+    extends State<_CsvImportDestinationDialog> {
+  final TextEditingController _newGroupController = TextEditingController();
+  bool _isNewGroupExpanded = false;
+  bool _isExistingGroupExpanded = false;
+  bool _showNewGroupError = false;
+
+  @override
+  void dispose() {
+    _newGroupController.dispose();
+    super.dispose();
+  }
+
+  void _finishWithNewGroup() {
+    final groupName = _newGroupController.text.trim();
+    if (groupName.isEmpty) {
+      setState(() => _showNewGroupError = true);
+      return;
+    }
+
+    Navigator.pop(context, _CsvImportDestination.newGroup(groupName));
+  }
+
+  void _toggleNewGroup() {
+    setState(() {
+      _isNewGroupExpanded = !_isNewGroupExpanded;
+      if (_isNewGroupExpanded) {
+        _isExistingGroupExpanded = false;
+      }
+    });
+  }
+
+  void _toggleExistingGroup() {
+    setState(() {
+      _isExistingGroupExpanded = !_isExistingGroupExpanded;
+      if (_isExistingGroupExpanded) {
+        _isNewGroupExpanded = false;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Deseja associar a um grupo?'),
+      content: SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  widget.pendingMessage,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+              const SizedBox(height: 8),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('N\u00e3o associar'),
+                onTap: () {
+                  Navigator.pop(context, const _CsvImportDestination.root());
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: AnimatedRotation(
+                  turns: _isNewGroupExpanded ? 0.25 : 0,
+                  duration: const Duration(milliseconds: 120),
+                  child: const Icon(Icons.chevron_right, size: 26),
+                ),
+                title: const Text('Adicionar grupo'),
+                onTap: _toggleNewGroup,
+              ),
+              if (_isNewGroupExpanded)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _newGroupController,
+                          autofocus: true,
+                          textInputAction: TextInputAction.done,
+                          decoration: InputDecoration(
+                            labelText: 'Nome do grupo',
+                            border: const OutlineInputBorder(),
+                            errorText: _showNewGroupError
+                                ? 'Digite o nome do grupo'
+                                : null,
+                          ),
+                          onChanged: (value) {
+                            if (_showNewGroupError && value.trim().isNotEmpty) {
+                              setState(() => _showNewGroupError = false);
+                            }
+                          },
+                          onSubmitted: (_) => _finishWithNewGroup(),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        width: 48,
+                        height: 56,
+                        child: FilledButton(
+                          onPressed: _finishWithNewGroup,
+                          style: FilledButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            backgroundColor: Colors.green,
+                            foregroundColor: Colors.white,
+                          ),
+                          child: const Icon(Icons.check),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: AnimatedRotation(
+                  turns: _isExistingGroupExpanded ? 0.25 : 0,
+                  duration: const Duration(milliseconds: 120),
+                  child: const Icon(Icons.chevron_right, size: 26),
+                ),
+                title: const Text('Selecionar grupo'),
+                onTap: _toggleExistingGroup,
+              ),
+              if (_isExistingGroupExpanded)
+                if (widget.groups.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text('Nenhum grupo criado'),
+                    ),
+                  )
+                else
+                  ...widget.groups.map((group) {
+                    final groupName = group.name.trim().isEmpty
+                        ? 'Grupo sem nome'
+                        : group.name.trim();
+
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.only(left: 34),
+                      title: Text(
+                        groupName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () {
+                        Navigator.pop(
+                          context,
+                          _CsvImportDestination.existingGroup(group.id),
+                        );
+                      },
+                    );
+                  }),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancelar'),
+        ),
+      ],
+    );
+  }
+}
+
 class HomeView extends StatefulWidget {
   const HomeView({super.key});
 
@@ -34,19 +247,26 @@ class HomeView extends StatefulWidget {
 
 class _HomeViewState extends State<HomeView> {
   static const String _defaultLabelImageAsset = 'assets/images/editar.png';
+  static const MethodChannel _csvImportChannel = MethodChannel(
+    'label_printer_app/csv_import',
+  );
 
   final LabelStorageService _storageService = const LabelStorageService();
+  final LabelImageService _labelImageService = const LabelImageService();
   final Map<String, GlobalKey<FormState>> _labelFormKeys = {};
   final Map<String, GlobalKey<FormState>> _groupFormKeys = {};
 
   List<LabelListItem> _items = [];
+  Uint8List? _customLabelImageBytes;
   bool _isLoadingLabels = true;
+  bool _isLoadingLabelImage = true;
   bool _isPrinting = false;
 
   @override
   void initState() {
     super.initState();
     unawaited(_loadItems());
+    unawaited(_loadLabelImage());
   }
 
   Future<void> _loadItems() async {
@@ -64,6 +284,17 @@ class _HomeViewState extends State<HomeView> {
     return _storageService.saveItems(_items);
   }
 
+  Future<void> _loadLabelImage() async {
+    final bytes = await _labelImageService.loadImageBytes();
+
+    if (!mounted) return;
+
+    setState(() {
+      _customLabelImageBytes = bytes;
+      _isLoadingLabelImage = false;
+    });
+  }
+
   GlobalKey<FormState> _labelFormKeyFor(String labelId) {
     return _labelFormKeys.putIfAbsent(labelId, () => GlobalKey<FormState>());
   }
@@ -79,7 +310,9 @@ class _HomeViewState extends State<HomeView> {
       case _LabelMenuAction.addLabel:
         _addRootLabel();
       case _LabelMenuAction.importCsv:
-        _showMessage('Importar csv sera configurado depois');
+        unawaited(_importCsv());
+      case _LabelMenuAction.csvRules:
+        _showCsvRulesDialog();
       case _LabelMenuAction.clearAll:
         unawaited(_clearAllItems());
     }
@@ -126,6 +359,338 @@ class _HomeViewState extends State<HomeView> {
     });
 
     unawaited(_persistItems());
+  }
+
+  void _showCsvRulesDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Regras csv'),
+          content: SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 380),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'O arquivo precisa estar no formato .csv e ter a primeira linha com os nomes das colunas.',
+                  ),
+                  const SizedBox(height: 12),
+                  _buildCsvRuleLine('Lenght: preenche o Comprimento.'),
+                  _buildCsvRuleLine('Width: preenche a Largura.'),
+                  _buildCsvRuleLine(
+                    'Qty: preenche a Quantidade e precisa ser um numero inteiro maior que zero.',
+                  ),
+                  _buildCsvRuleLine('Label: preenche o Texto da etiqueta.'),
+                  _buildCsvRuleLine(
+                    'Enabled: pode existir no arquivo, mas sera ignorado.',
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Exemplo:',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.04),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.black12),
+                    ),
+                    child: const SelectableText(
+                      'Lenght,Width,Qty,Label,Enabled\n'
+                      '350,740,22,Interna,true\n'
+                      '760,1050,1,Lat maior,true',
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 12,
+                        height: 1.3,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Cada linha depois do cabecalho cria uma etiqueta. Depois de escolher o arquivo, é possível importar livremente ou associar a um grupo.',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Fechar'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildCsvRuleLine(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('- '),
+          Expanded(child: Text(text)),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _importCsv() async {
+    try {
+      final response = await _csvImportChannel.invokeMapMethod<String, Object?>(
+        'pickCsv',
+      );
+
+      if (!mounted) return;
+
+      if (response == null) {
+        _showMessage('N\u00e3o foi poss\u00edvel importar o CSV');
+        return;
+      }
+
+      if (response['success'] != true) {
+        if (response['canceled'] == true) return;
+
+        final error = response['error'] as String?;
+        _showMessage(error ?? 'N\u00e3o foi poss\u00edvel importar o CSV');
+        return;
+      }
+
+      final content = response['content'] as String? ?? '';
+      final labels = _parseCsvLabels(content);
+
+      if (labels.isEmpty) {
+        _showMessage('Nenhuma etiqueta encontrada no CSV');
+        return;
+      }
+
+      final destination = await _showCsvImportDestinationDialog(labels.length);
+      if (destination == null || !mounted) return;
+
+      setState(() {
+        _addImportedLabels(labels, destination);
+      });
+
+      unawaited(_persistItems());
+      _showMessage(_importSuccessMessage(labels.length));
+    } on MissingPluginException {
+      _showMessage(
+        'Importa\u00e7\u00e3o de CSV dispon\u00edvel apenas no Android',
+      );
+    } on FormatException catch (error) {
+      final message = error.message;
+      _showMessage(message.isEmpty ? 'CSV inv\u00e1lido' : message);
+    } catch (error) {
+      _showMessage('Falha ao importar CSV: $error');
+    }
+  }
+
+  List<LabelData> _parseCsvLabels(String content) {
+    final rows = _parseCsvRows(content);
+    if (rows.isEmpty) {
+      throw const FormatException('CSV vazio');
+    }
+
+    final header = rows.first;
+    final lengthIndex = _csvHeaderIndex(header, [
+      'lenght',
+      'length',
+      'comprimento',
+    ]);
+    final widthIndex = _csvHeaderIndex(header, ['width', 'largura']);
+    final quantityIndex = _csvHeaderIndex(header, ['qty', 'wty', 'quantidade']);
+    final labelIndex = _csvHeaderIndex(header, ['label', 'texto', 'text']);
+
+    if (lengthIndex == null ||
+        widthIndex == null ||
+        quantityIndex == null ||
+        labelIndex == null) {
+      throw const FormatException(
+        'O CSV precisa conter as colunas Lenght, Width, Qty e Label',
+      );
+    }
+
+    final labels = <LabelData>[];
+    for (var rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+      final row = rows[rowIndex];
+      final lengthText = _csvCell(row, lengthIndex).trim();
+      final widthText = _csvCell(row, widthIndex).trim();
+      final quantityText = _csvCell(row, quantityIndex).trim();
+      final labelText = _csvCell(row, labelIndex).trim();
+
+      if (lengthText.isEmpty &&
+          widthText.isEmpty &&
+          quantityText.isEmpty &&
+          labelText.isEmpty) {
+        continue;
+      }
+
+      if (lengthText.isEmpty ||
+          widthText.isEmpty ||
+          quantityText.isEmpty ||
+          labelText.isEmpty) {
+        throw FormatException(
+          'Linha ${rowIndex + 1}: preencha Lenght, Width, Qty e Label',
+        );
+      }
+
+      final quantity = int.tryParse(quantityText);
+      if (quantity == null || quantity <= 0) {
+        throw FormatException(
+          'Linha ${rowIndex + 1}: Qty precisa ser um n\u00famero inteiro maior que zero',
+        );
+      }
+
+      final label = LabelData.empty()
+        ..text = labelText
+        ..lengthText = lengthText
+        ..widthText = widthText
+        ..quantityText = quantity.toString()
+        ..isSelected = false
+        ..isEditing = false;
+
+      labels.add(label);
+    }
+
+    return labels;
+  }
+
+  List<List<String>> _parseCsvRows(String content) {
+    final rows = <List<String>>[];
+    var row = <String>[];
+    final cell = StringBuffer();
+    var inQuotes = false;
+
+    for (var index = 0; index < content.length; index++) {
+      final char = content[index];
+
+      if (char == '"') {
+        final hasEscapedQuote =
+            inQuotes && index + 1 < content.length && content[index + 1] == '"';
+
+        if (hasEscapedQuote) {
+          cell.write('"');
+          index++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+
+      if (char == ',' && !inQuotes) {
+        row.add(cell.toString().trim());
+        cell.clear();
+        continue;
+      }
+
+      final isLineBreak = char == '\n' || char == '\r';
+      if (isLineBreak && !inQuotes) {
+        if (char == '\r' &&
+            index + 1 < content.length &&
+            content[index + 1] == '\n') {
+          index++;
+        }
+
+        row.add(cell.toString().trim());
+        cell.clear();
+        if (row.any((field) => field.trim().isNotEmpty)) rows.add(row);
+        row = <String>[];
+        continue;
+      }
+
+      cell.write(char);
+    }
+
+    row.add(cell.toString().trim());
+    if (row.any((field) => field.trim().isNotEmpty)) rows.add(row);
+
+    if (inQuotes) {
+      throw const FormatException('CSV inv\u00e1lido: aspas n\u00e3o fechadas');
+    }
+
+    return rows;
+  }
+
+  int? _csvHeaderIndex(List<String> header, List<String> aliases) {
+    for (var index = 0; index < header.length; index++) {
+      final normalized = _normalizeCsvHeader(header[index]);
+      if (aliases.contains(normalized)) return index;
+    }
+
+    return null;
+  }
+
+  String _normalizeCsvHeader(String value) {
+    return value.replaceFirst('\ufeff', '').trim().toLowerCase();
+  }
+
+  String _csvCell(List<String> row, int index) {
+    return index < row.length ? row[index] : '';
+  }
+
+  Future<_CsvImportDestination?> _showCsvImportDestinationDialog(
+    int labelCount,
+  ) async {
+    final groups = _items.whereType<LabelGroupData>().toList(growable: false);
+
+    return showDialog<_CsvImportDestination>(
+      context: context,
+      builder: (context) {
+        return _CsvImportDestinationDialog(
+          labelCount: labelCount,
+          groups: groups,
+          pendingMessage: _pendingImportMessage(labelCount),
+        );
+      },
+    );
+  }
+
+  void _addImportedLabels(
+    List<LabelData> labels,
+    _CsvImportDestination destination,
+  ) {
+    switch (destination.target) {
+      case _CsvImportTarget.root:
+        _items.addAll(labels);
+      case _CsvImportTarget.newGroup:
+        final group = LabelGroupData.empty()
+          ..name = destination.groupName?.trim() ?? ''
+          ..labels = labels
+          ..isEditing = false
+          ..isExpanded = true;
+        _items.add(group);
+      case _CsvImportTarget.existingGroup:
+        final groupId = destination.groupId;
+        final group = groupId == null ? null : _findGroup(groupId);
+        if (group == null) {
+          _items.addAll(labels);
+          return;
+        }
+
+        group.isExpanded = true;
+        group.labels.addAll(labels);
+    }
+  }
+
+  String _pendingImportMessage(int labelCount) {
+    return labelCount == 1
+        ? '1 etiqueta pronta para importar'
+        : '$labelCount etiquetas prontas para importar';
+  }
+
+  String _importSuccessMessage(int labelCount) {
+    return labelCount == 1
+        ? '1 etiqueta importada'
+        : '$labelCount etiquetas importadas';
   }
 
   Future<void> _clearAllItems() async {
@@ -528,8 +1093,93 @@ class _HomeViewState extends State<HomeView> {
     return null;
   }
 
-  void _showImageImportPending() {
-    _showMessage('Importar imagem sera configurado depois');
+  Future<void> _showLabelImageOptions() async {
+    final action = await showDialog<_LabelImageAction>(
+      context: context,
+      builder: (context) {
+        final canRemove = _customLabelImageBytes != null;
+
+        return AlertDialog(
+          title: const Text('Imagem da etiqueta'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                enabled: canRemove,
+                leading: Icon(
+                  Icons.delete_outline,
+                  color: canRemove ? Colors.red : Colors.black26,
+                ),
+                title: Text(
+                  'Remover',
+                  style: TextStyle(
+                    color: canRemove ? Colors.black : Colors.black38,
+                  ),
+                ),
+                onTap: canRemove
+                    ? () => Navigator.pop(context, _LabelImageAction.remove)
+                    : null,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Adicionar imagem'),
+                onTap: () => Navigator.pop(context, _LabelImageAction.add),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancelar'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (action == null || !mounted) return;
+
+    switch (action) {
+      case _LabelImageAction.remove:
+        await _removeCustomLabelImage();
+      case _LabelImageAction.add:
+        await _pickCustomLabelImage();
+    }
+  }
+
+  Future<void> _pickCustomLabelImage() async {
+    try {
+      final bytes = await _labelImageService.pickImage();
+      if (bytes == null || !mounted) return;
+
+      setState(() => _customLabelImageBytes = bytes);
+      _showMessage('Imagem importada');
+    } catch (error) {
+      _showMessage(_cleanStateError(error));
+    }
+  }
+
+  Future<void> _removeCustomLabelImage() async {
+    if (_customLabelImageBytes == null) return;
+
+    try {
+      await _labelImageService.removeImage();
+      if (!mounted) return;
+
+      setState(() => _customLabelImageBytes = null);
+      _showMessage('Imagem padrao restaurada');
+    } catch (error) {
+      _showMessage(_cleanStateError(error));
+    }
+  }
+
+  String _cleanStateError(Object error) {
+    final message = error.toString();
+    return message.startsWith('Bad state: ')
+        ? message.substring('Bad state: '.length)
+        : message;
   }
 
   void _showMessage(String message) {
@@ -546,7 +1196,7 @@ class _HomeViewState extends State<HomeView> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Menta e hortel\u00e3'),
+        title: const Text('Print Cuts'),
         actions: [
           IconButton(
             tooltip: 'Bluetooth',
@@ -581,6 +1231,10 @@ class _HomeViewState extends State<HomeView> {
               PopupMenuItem(
                 value: _LabelMenuAction.importCsv,
                 child: Text('Importar csv'),
+              ),
+              PopupMenuItem(
+                value: _LabelMenuAction.csvRules,
+                child: Text('Regras csv'),
               ),
               PopupMenuItem(
                 value: _LabelMenuAction.clearAll,
@@ -622,7 +1276,7 @@ class _HomeViewState extends State<HomeView> {
               border: Border.all(color: Colors.black12),
               borderRadius: BorderRadius.circular(8),
             ),
-            child: Image.asset(_defaultLabelImageAsset, fit: BoxFit.contain),
+            child: _buildLabelImage(),
           ),
           Positioned(
             right: -6,
@@ -637,13 +1291,39 @@ class _HomeViewState extends State<HomeView> {
                   color: Colors.white,
                   size: 20,
                 ),
-                onPressed: _showImageImportPending,
+                onPressed: () => unawaited(_showLabelImageOptions()),
               ),
             ),
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildLabelImage() {
+    if (_isLoadingLabelImage) {
+      return const Center(
+        child: SizedBox(
+          width: 22,
+          height: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+
+    final customBytes = _customLabelImageBytes;
+    if (customBytes != null) {
+      return Image.memory(
+        customBytes,
+        fit: BoxFit.contain,
+        gaplessPlayback: true,
+        errorBuilder: (context, error, stackTrace) {
+          return Image.asset(_defaultLabelImageAsset, fit: BoxFit.contain);
+        },
+      );
+    }
+
+    return Image.asset(_defaultLabelImageAsset, fit: BoxFit.contain);
   }
 
   Widget _buildItemList() {

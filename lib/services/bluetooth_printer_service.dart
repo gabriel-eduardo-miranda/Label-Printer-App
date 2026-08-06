@@ -7,8 +7,11 @@ import 'package:flutter_pos_printer_platform/flutter_pos_printer_platform.dart';
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
+import 'label_image_service.dart';
+
 class BluetoothPrinterService extends ChangeNotifier {
   final PrinterManager _printerManager = PrinterManager.instance;
+  final LabelImageService _labelImageService = const LabelImageService();
   static const MethodChannel _bleScannerChannel = MethodChannel(
     'label_printer_app/ble_scanner',
   );
@@ -16,6 +19,7 @@ class BluetoothPrinterService extends ChangeNotifier {
   static const int _dpi = 203;
   static const int _labelWidthMm = 50;
   static const int _labelHeightMm = 60;
+  static const int _labelGapMm = 2;
   static const int _printableWidthDots = 384;
   static const int _leftMarginDots = 0;
   static const int _contentInsetDots = 8;
@@ -417,18 +421,15 @@ class BluetoothPrinterService extends ChangeNotifier {
     required String quantityText,
   }) async {
     final labelHeightPx = _mmToDots(_labelHeightMm);
+    final labelGapPx = _mmToDots(_labelGapMm);
+    final printAdvanceHeightPx = labelHeightPx + labelGapPx;
     final nominalLabelWidthPx = _mmToDots(_labelWidthMm);
     const canvasWidth = _printableWidthDots;
 
     final imageSizePx = _mmToDots(15);
     const textLineHeight = 28;
     final imageTextGapPx = _mmToDots(5);
-    final imageBytes = await rootBundle.load(_labelImageAsset);
-    final decodedImage = img.decodeImage(imageBytes.buffer.asUint8List());
-
-    if (decodedImage == null) {
-      throw StateError('Nao foi possivel carregar a imagem da etiqueta');
-    }
+    final decodedImage = await _loadLabelImage(jobId: jobId);
 
     final lines = [
       _singleLine(text),
@@ -445,7 +446,8 @@ class BluetoothPrinterService extends ChangeNotifier {
     const imageX = _contentInsetDots;
     const textX = _contentInsetDots;
 
-    final canvas = img.Image(canvasWidth, labelHeightPx)..fill(0xffffffff);
+    final canvas = img.Image(canvasWidth, printAdvanceHeightPx)
+      ..fill(0xffffffff);
 
     final imageY = ((labelHeightPx - contentHeight) / 2).round().clamp(
       0,
@@ -485,8 +487,9 @@ class BluetoothPrinterService extends ChangeNotifier {
     final firstBlackX = _findFirstBlackPixelX(canvas);
     _log(
       '[XDEBUG #$jobId] Raster: etiqueta=${_labelWidthMm}x$_labelHeightMm mm '
+      'gap=$_labelGapMm mm '
       'nominal=${nominalLabelWidthPx}x$labelHeightPx dots '
-      'enviado=${canvasWidth}x$labelHeightPx dots margem=$_leftMarginDots '
+      'enviado=${canvasWidth}x$printAdvanceHeightPx dots margem=$_leftMarginDots '
       'recuo=$_contentInsetDots primeiroPretoX=$firstBlackX',
     );
 
@@ -550,6 +553,28 @@ class BluetoothPrinterService extends ChangeNotifier {
     );
 
     return bytes;
+  }
+
+  Future<img.Image> _loadLabelImage({required int jobId}) async {
+    final customBytes = await _labelImageService.loadImageBytes();
+    if (customBytes != null && customBytes.isNotEmpty) {
+      final decodedCustomImage = img.decodeImage(customBytes);
+      if (decodedCustomImage != null) {
+        _log('[XDEBUG #$jobId] Imagem importada carregada para a etiqueta');
+        return decodedCustomImage;
+      }
+
+      _log('[XDEBUG #$jobId] Imagem importada invalida; usando imagem padrao');
+    }
+
+    final imageBytes = await rootBundle.load(_labelImageAsset);
+    final decodedImage = img.decodeImage(imageBytes.buffer.asUint8List());
+
+    if (decodedImage == null) {
+      throw StateError('Nao foi possivel carregar a imagem da etiqueta');
+    }
+
+    return decodedImage;
   }
 
   List<int> _buildEscPosPrintStartBytes(int printAreaWidthDots) {

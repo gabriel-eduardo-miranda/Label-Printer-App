@@ -138,6 +138,9 @@ class LabelGroupData extends LabelListItem {
   }
 }
 
+int _idSequence = 0;
+
 String _newId(String prefix) {
-  return '${prefix}_${DateTime.now().microsecondsSinceEpoch}';
+  _idSequence = (_idSequence + 1) % 0x3fffffff;
+  return '${prefix}_${DateTime.now().microsecondsSinceEpoch}_$_idSequence';
 }
