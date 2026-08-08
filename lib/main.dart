@@ -21,7 +21,7 @@ class LabelPrinterApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Impressora de Etiquetas',
+      title: 'Print Cuts',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,

@@ -31,6 +31,12 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val csvPickerRequestCode = 8842
     private val imagePickerRequestCode = 8843
+    private val bleQualityNoResponseChunkSize = 120
+    private val bleQualityNoResponseDelayMs = 10L
+    private val bleQualityNoResponseBlockEveryChunks = 48
+    private val bleQualityNoResponseBlockDelayMs = 45L
+    private val bleQualityRetryBaseDelayMs = 45L
+    private val bleQualityRetryStepDelayMs = 20L
     private val mainHandler = Handler(Looper.getMainLooper())
     private var activeScanCallback: ScanCallback? = null
     private var activeFinishCallback: Runnable? = null
@@ -41,9 +47,12 @@ class MainActivity : FlutterActivity() {
     private var negotiatedMtu = 23
     private var activeWriteResult: MethodChannel.Result? = null
     private var activeWriteLogs: MutableList<String>? = null
+    private var activeWriteData: ByteArray = ByteArray(0)
     private var activeWriteChunks: List<ByteArray> = emptyList()
     private var activeWriteIndex = 0
     private var activeWriteUseResponse = false
+    private var activeWriteFallbackAttempted = false
+    private var activeWriteRetryCount = 0
     private var activeWriteStartedAtMs = 0L
     private var activeWriteTimeout: Runnable? = null
     private var activeCsvImportResult: MethodChannel.Result? = null
@@ -903,7 +912,7 @@ class MainActivity : FlutterActivity() {
             }
         }
 
-        return responseCandidate ?: noResponseCandidate
+        return noResponseCandidate ?: responseCandidate
     }
 
     private fun disconnectBlePrinter() {
@@ -992,17 +1001,13 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        val useResponse = canWriteWithResponse
-        val mtuPayload = (negotiatedMtu - 3).coerceAtLeast(20)
-        val chunkSize = mtuPayload.coerceAtMost(if (useResponse) 180 else 60)
-        val chunks = data.toList().chunked(chunkSize).map { chunk ->
-            ByteArray(chunk.size) { index -> chunk[index] }
-        }
+        val useResponse = !canWriteNoResponse && canWriteWithResponse
+        val chunks = buildWriteChunks(data, useResponse)
 
         logs.add(
             "[XDEBUG BLE] Inicio escrita $jobId bytes=${data.size} chunks=${chunks.size} " +
-                "chunkSize=$chunkSize mtu=$negotiatedMtu writeType=" +
-                (if (useResponse) "DEFAULT_ACK" else "NO_RESPONSE_THROTTLED")
+                "chunkSize=${chunks.firstOrNull()?.size ?: 0} mtu=$negotiatedMtu writeType=" +
+                (if (useResponse) "DEFAULT_ACK" else "NO_RESPONSE_QUALITY")
         )
         logs.add(
             "[XDEBUG BLE] checksum=${checksum16(data)} prefix=${hexPreview(data, 40)} " +
@@ -1011,12 +1016,25 @@ class MainActivity : FlutterActivity() {
 
         activeWriteResult = result
         activeWriteLogs = logs
+        activeWriteData = data
         activeWriteChunks = chunks
         activeWriteIndex = 0
         activeWriteUseResponse = useResponse
+        activeWriteFallbackAttempted = false
+        activeWriteRetryCount = 0
         activeWriteStartedAtMs = System.currentTimeMillis()
 
         writeNextBleChunk()
+    }
+
+    private fun buildWriteChunks(data: ByteArray, useResponse: Boolean): List<ByteArray> {
+        val mtuPayload = (negotiatedMtu - 3).coerceAtLeast(20)
+        val maxChunkSize = if (useResponse) 120 else bleQualityNoResponseChunkSize
+        val chunkSize = mtuPayload.coerceAtMost(maxChunkSize).coerceAtLeast(20)
+
+        return data.toList().chunked(chunkSize).map { chunk ->
+            ByteArray(chunk.size) { index -> chunk[index] }
+        }
     }
 
     private fun writeNextBleChunk() {
@@ -1042,19 +1060,19 @@ class MainActivity : FlutterActivity() {
                 BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             } else {
                 BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            }
+        }
 
         try {
-            characteristic.writeType = writeType
-            @Suppress("DEPRECATION")
-            characteristic.value = chunk
-            @Suppress("DEPRECATION")
-            val started = gatt.writeCharacteristic(characteristic)
+            val started = startCharacteristicWrite(gatt, characteristic, chunk, writeType)
 
             if (!started) {
+                if (retryNoResponseChunk(chunkIndex)) return
+                if (tryFallbackNoResponse(chunkIndex)) return
+
                 finishActiveWrite(
                     false,
-                    "[XDEBUG BLE] Falha ao iniciar chunk ${chunkIndex + 1}/${activeWriteChunks.size}"
+                    "[XDEBUG BLE] Falha ao iniciar chunk ${chunkIndex + 1}/${activeWriteChunks.size} " +
+                        "writeType=${if (activeWriteUseResponse) "DEFAULT_ACK" else "NO_RESPONSE"}"
                 )
                 return
             }
@@ -1066,12 +1084,18 @@ class MainActivity : FlutterActivity() {
                 )
             }
 
+            activeWriteRetryCount = 0
             activeWriteIndex++
 
             if (activeWriteUseResponse) {
                 scheduleWriteAckTimeout(chunkIndex + 1)
             } else {
-                val delayMs = if (activeWriteIndex % 32 == 0) 90L else 18L
+                val delayMs =
+                    if (activeWriteIndex % bleQualityNoResponseBlockEveryChunks == 0) {
+                        bleQualityNoResponseBlockDelayMs
+                    } else {
+                        bleQualityNoResponseDelayMs
+                    }
                 mainHandler.postDelayed({ writeNextBleChunk() }, delayMs)
             }
         } catch (e: SecurityException) {
@@ -1081,8 +1105,85 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun retryNoResponseChunk(chunkIndex: Int): Boolean {
+        if (activeWriteUseResponse || activeWriteRetryCount >= 10) return false
+
+        activeWriteRetryCount++
+        val delayMs = bleQualityRetryBaseDelayMs + (activeWriteRetryCount * bleQualityRetryStepDelayMs)
+        activeWriteLogs?.add(
+            "[XDEBUG BLE] NO_RESPONSE ocupado no chunk ${chunkIndex + 1}/${activeWriteChunks.size}; " +
+                "retry=$activeWriteRetryCount delayMs=$delayMs"
+        )
+        mainHandler.postDelayed({ writeNextBleChunk() }, delayMs)
+        return true
+    }
+
+    private fun startCharacteristicWrite(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        chunk: ByteArray,
+        writeType: Int
+    ): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = gatt.writeCharacteristic(characteristic, chunk, writeType)
+            if (status != 0) {
+                activeWriteLogs?.add(
+                    "[XDEBUG BLE] writeCharacteristic API33 status=$status " +
+                        "writeType=${writeTypeName(writeType)} bytes=${chunk.size}"
+                )
+            }
+            status == 0
+        } else {
+            characteristic.writeType = writeType
+            @Suppress("DEPRECATION")
+            characteristic.value = chunk
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(characteristic)
+        }
+    }
+
+    private fun tryFallbackNoResponse(chunkIndex: Int): Boolean {
+        if (!activeWriteUseResponse ||
+            activeWriteFallbackAttempted ||
+            chunkIndex != 0 ||
+            !printerSupportsWriteNoResponse ||
+            activeWriteData.isEmpty()
+        ) {
+            return false
+        }
+
+        activeWriteFallbackAttempted = true
+        activeWriteUseResponse = false
+        activeWriteChunks = buildWriteChunks(activeWriteData, useResponse = false)
+        activeWriteIndex = 0
+        activeWriteLogs?.add(
+            "[XDEBUG BLE] DEFAULT_ACK recusado no primeiro chunk; " +
+                "tentando fallback NO_RESPONSE_QUALITY chunks=${activeWriteChunks.size} " +
+                "chunkSize=${activeWriteChunks.firstOrNull()?.size ?: 0}"
+        )
+
+        mainHandler.postDelayed({ writeNextBleChunk() }, 120L)
+        return true
+    }
+
+    private fun writeTypeName(writeType: Int): String {
+        return when (writeType) {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT -> "DEFAULT_ACK"
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE -> "NO_RESPONSE"
+            else -> writeType.toString()
+        }
+    }
+
     private fun handleWriteResponse(status: Int) {
         val logs = activeWriteLogs ?: return
+
+        if (!activeWriteUseResponse) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                logs.add("[XDEBUG BLE] Callback NO_RESPONSE ignorado status=$status chunk=$activeWriteIndex")
+            }
+            return
+        }
+
         activeWriteTimeout?.let { mainHandler.removeCallbacks(it) }
         activeWriteTimeout = null
 
@@ -1126,9 +1227,12 @@ class MainActivity : FlutterActivity() {
 
         activeWriteResult = null
         activeWriteLogs = null
+        activeWriteData = ByteArray(0)
         activeWriteChunks = emptyList()
         activeWriteIndex = 0
         activeWriteUseResponse = false
+        activeWriteFallbackAttempted = false
+        activeWriteRetryCount = 0
         activeWriteStartedAtMs = 0L
 
         result.success(mapOf("success" to success, "logs" to logs))

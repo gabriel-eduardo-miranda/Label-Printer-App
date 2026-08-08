@@ -103,6 +103,13 @@ class BluetoothPrinterService extends ChangeNotifier {
     _isScanning = true;
     notifyListeners();
 
+    if (Platform.isAndroid) {
+      _log('Scan BLE nativo iniciado');
+      await _scanWithNativeBleFallback();
+      stopScan();
+      return;
+    }
+
     _scanSubscription = _printerManager
         .discovery(type: PrinterType.bluetooth, isBle: true)
         .listen(

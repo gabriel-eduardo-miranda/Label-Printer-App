@@ -27,6 +27,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.11.0
 
 flutter:
   uses-material-design: true
@@ -34,3 +35,8 @@ flutter:
   # Configuração para que o app reconheça imagens locais (vamos usar depois para o seu logo PNG)
   assets:
     - assets/images/
+
+flutter_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/icon.png"
